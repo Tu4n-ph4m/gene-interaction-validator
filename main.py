@@ -1,8 +1,12 @@
 """CLI entry point: validate gene-gene pairs against StringDB and BioGRID.
 
 Single pair (agentic, prose report):
-    python main.py GENE1 GENE2 [species_tax_id]
-    python main.py GENE1 GENE2 --tissue liver
+    python main.py GENE1 GENE2
+    python main.py GENE1 GENE2 --species mouse --tissue liver
+
+--species accepts a common name (human, mouse, rat, zebrafish, fruit fly,
+yeast, c. elegans, chicken, pig, cow, dog, rabbit) or a raw NCBI taxonomy ID
+(e.g. 9606). Defaults to human.
 
 Explicit pairs from a CSV (deterministic, structured table):
     python main.py --batch pairs.csv --out results.csv
@@ -23,7 +27,8 @@ Only pairs with at least one database reporting evidence are returned --
 a full matrix including the (huge majority of) non-interacting pairs would
 be mostly-empty noise once the list reaches hundreds of genes.
 
-pairs.csv must have columns: gene1,gene2  (optional: species_tax_id,tissue)
+pairs.csv must have columns: gene1,gene2  (optional: species_tax_id,tissue --
+species_tax_id may also be a common name like "mouse")
 A per-row "tissue" column overrides --tissue for that row.
 """
 
@@ -38,6 +43,7 @@ from gene_validator.batch import (
     write_results_csv,
     write_results_json,
 )
+from gene_validator.species import resolve_species
 
 
 def main() -> None:
@@ -60,8 +66,19 @@ def main() -> None:
         "--tissue",
         help="Tissue/cell type to check expression context for (e.g. 'liver', 'prostate')",
     )
+    parser.add_argument(
+        "--species",
+        default="human",
+        help="Species name (human, mouse, rat, zebrafish, ...) or NCBI taxonomy ID. Default: human",
+    )
     parser.add_argument("positional", nargs="*")
     args = parser.parse_args()
+
+    try:
+        species_tax_id = resolve_species(args.species)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
 
     if args.batch or args.genes or args.gene_file:
         if not args.out:
@@ -78,7 +95,9 @@ def main() -> None:
             if len(genes) < 2:
                 print("Error: need at least 2 gene symbols")
                 sys.exit(1)
-            results, invalid_genes = validate_gene_network(genes, tissue=args.tissue)
+            results, invalid_genes = validate_gene_network(
+                genes, species_tax_id, tissue=args.tissue
+            )
         else:
             results = validate_pairs_from_csv(args.batch, default_tissue=args.tissue)
 
@@ -100,7 +119,12 @@ def main() -> None:
         sys.exit(1)
 
     gene1, gene2 = args.positional[0], args.positional[1]
-    species_tax_id = int(args.positional[2]) if len(args.positional) > 2 else 9606
+    if len(args.positional) > 2:
+        try:
+            species_tax_id = resolve_species(args.positional[2])
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            sys.exit(1)
 
     result = validate_gene_pair(gene1, gene2, species_tax_id, tissue=args.tissue)
     print(result)

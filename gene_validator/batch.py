@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 
 import requests
 
+from gene_validator.species import resolve_species
 from gene_validator.tools import (
     HTTP_TIMEOUT,
     bulk_biogrid_network,
@@ -286,13 +287,14 @@ def validate_pairs_from_csv(
 
     Accepts a local file path or an http(s) URL (see `read_source`).
     Each row may include an optional `tissue` column that overrides
-    `default_tissue` for that row.
+    `default_tissue` for that row, and an optional `species_tax_id` column
+    that accepts either a common name ("mouse") or a raw NCBI taxonomy ID.
     """
     results = []
     content = read_source(input_path_or_url)
     for row in csv.DictReader(io.StringIO(content)):
         gene1, gene2 = row["gene1"].strip(), row["gene2"].strip()
-        species_tax_id = int(row.get("species_tax_id") or 9606)
+        species_tax_id = resolve_species(row.get("species_tax_id"))
         tissue = (row.get("tissue") or "").strip() or default_tissue
         results.append(validate_pair(gene1, gene2, species_tax_id, tissue))
     return results

@@ -24,6 +24,7 @@ for _key in ("ANTHROPIC_API_KEY", "BIOGRID_ACCESS_KEY"):
         os.environ[_key] = st.secrets[_key]
 
 from gene_validator.batch import validate_gene_network  # noqa: E402
+from gene_validator.species import SPECIES_DISPLAY_OPTIONS, resolve_species  # noqa: E402
 
 st.set_page_config(page_title="Gene Interaction Network", page_icon="🧬", layout="wide")
 
@@ -44,9 +45,7 @@ with st.form("network_form"):
     tissue = col1.text_input(
         "Tissue / cell type (optional)", placeholder="liver, prostate, bone marrow, ..."
     ).strip()
-    species_tax_id = col2.number_input(
-        "Species NCBI taxonomy ID", value=9606, step=1, help="9606 = human"
-    )
+    species_name = col2.selectbox("Species", SPECIES_DISPLAY_OPTIONS, index=0)
     submitted = st.form_submit_button("Find interactions", use_container_width=True)
 
 if submitted:
@@ -56,10 +55,11 @@ if submitted:
     elif not os.environ.get("BIOGRID_ACCESS_KEY"):
         st.error("BIOGRID_ACCESS_KEY is not configured for this app.")
     else:
+        species_tax_id = resolve_species(species_name)
         with st.spinner(f"Querying StringDB + BioGRID for {len(genes)} genes..."):
             try:
                 results, invalid_genes = validate_gene_network(
-                    genes, int(species_tax_id), tissue or None
+                    genes, species_tax_id, tissue or None
                 )
             except Exception as exc:
                 st.error(f"Lookup failed: {exc}")

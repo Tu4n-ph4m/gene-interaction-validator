@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from gene_validator.batch import validate_gene_network
+from gene_validator.species import SPECIES_DISPLAY_OPTIONS, resolve_species
 
 load_dotenv()
 
@@ -32,12 +33,17 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 class NetworkRequest(BaseModel):
     genes: List[str] = Field(..., min_length=2)
     tissue: Optional[str] = None
-    species_tax_id: int = 9606
+    species: Optional[str] = "human"
 
 
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
+@app.get("/api/species")
+def species_options() -> dict:
+    return {"options": SPECIES_DISPLAY_OPTIONS}
 
 
 @app.post("/api/network")
@@ -53,7 +59,12 @@ def network(req: NetworkRequest) -> dict:
         raise HTTPException(status_code=400, detail="Provide at least 2 gene symbols.")
 
     try:
-        results, invalid_genes = validate_gene_network(genes, req.species_tax_id, req.tissue)
+        species_tax_id = resolve_species(req.species)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        results, invalid_genes = validate_gene_network(genes, species_tax_id, req.tissue)
     except Exception as exc:  # surface upstream API errors as a clean 502, not a stack trace
         raise HTTPException(status_code=502, detail=f"Lookup failed: {exc}") from exc
 

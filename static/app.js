@@ -2,8 +2,23 @@ const form = document.getElementById("network-form");
 const submitBtn = document.getElementById("submit-btn");
 const statusEl = document.getElementById("status");
 const resultsEl = document.getElementById("results");
+const speciesSelect = document.getElementById("species");
 
 let lastResults = [];
+
+async function loadSpeciesOptions() {
+  try {
+    const resp = await fetch("/api/species");
+    if (!resp.ok) return;
+    const data = await resp.json();
+    speciesSelect.innerHTML = data.options
+      .map((name) => `<option value="${name}">${name}</option>`)
+      .join("");
+  } catch {
+    // Keep the static "Human" fallback already in the HTML.
+  }
+}
+loadSpeciesOptions();
 
 function splitGenes(text) {
   return text
@@ -120,7 +135,7 @@ form.addEventListener("submit", async (e) => {
 
   const genes = splitGenes(document.getElementById("genes").value);
   const tissue = document.getElementById("tissue").value.trim() || null;
-  const species = parseInt(document.getElementById("species").value, 10) || 9606;
+  const species = speciesSelect.value || "human";
 
   if (genes.length < 2) {
     setStatus("Enter at least 2 gene symbols.", "error");
@@ -136,7 +151,7 @@ form.addEventListener("submit", async (e) => {
     const resp = await fetch("/api/network", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ genes, tissue, species_tax_id: species }),
+      body: JSON.stringify({ genes, tissue, species }),
     });
 
     if (!resp.ok) {
