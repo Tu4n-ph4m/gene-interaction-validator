@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gene Interaction Network Finder</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main>
+    <h1>🧬 Gene Interaction Network Finder</h1>
+    <p class="subtitle">
+      Paste a list of genes. Finds every interacting pair among them via StringDB and
+      BioGRID, with links to the source records. Optionally scope to a tissue/cell type
+      via the Human Protein Atlas.
+    </p>
+
+    <form id="network-form">
+      <label for="genes">Genes (comma, space, or newline separated)</label>
+      <textarea id="genes" rows="5" placeholder="BRCA1, BRCA2, TP53, EGFR, MYC, PTEN"></textarea>
+
+      <div class="row">
+        <div class="field">
+          <label for="tissue">Tissue / cell type (optional)</label>
+          <input id="tissue" type="text" placeholder="liver, prostate, bone marrow, ..." />
+        </div>
+        <div class="field">
+          <label for="species">Species NCBI taxonomy ID</label>
+          <input id="species" type="number" value="9606" />
+        </div>
+      </div>
+
+      <button type="submit" id="submit-btn">Find interactions</button>
+    </form>
+
+    <div id="status"></div>
+    <div id="results"></div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

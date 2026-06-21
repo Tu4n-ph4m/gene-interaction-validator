@@ -1,0 +1,69 @@
+"""No-Streamlit web frontend: FastAPI backend + plain HTML/CSS/JS frontend.
+
+Input: a list of genes. Output: every interacting pair found among them,
+with links to the StringDB/BioGRID source records. Same underlying logic
+as the CLI's --genes mode and the Streamlit app (gene_validator.batch).
+
+Run:
+    uvicorn webapp:app --reload
+    -> open http://127.0.0.1:8000
+"""
+
+import os
+from dataclasses import asdict
+from typing import List, Optional
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from gene_validator.batch import validate_gene_network
+
+load_dotenv()
+
+app = FastAPI(title="Gene Interaction Network Finder")
+
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+class NetworkRequest(BaseModel):
+    genes: List[str] = Field(..., min_length=2)
+    tissue: Optional[str] = None
+    species_tax_id: int = 9606
+
+
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
+@app.post("/api/network")
+def network(req: NetworkRequest) -> dict:
+    if not os.environ.get("ANTHROPIC_API_KEY") or not os.environ.get("BIOGRID_ACCESS_KEY"):
+        raise HTTPException(
+            status_code=500,
+            detail="Server is missing ANTHROPIC_API_KEY/BIOGRID_ACCESS_KEY -- check .env.",
+        )
+
+    genes = [g.strip() for g in req.genes if g.strip()]
+    if len(genes) < 2:
+        raise HTTPException(status_code=400, detail="Provide at least 2 gene symbols.")
+
+    try:
+        results, invalid_genes = validate_gene_network(genes, req.species_tax_id, req.tissue)
+    except Exception as exc:  # surface upstream API errors as a clean 502, not a stack trace
+        raise HTTPException(status_code=502, detail=f"Lookup failed: {exc}") from exc
+
+    return {
+        "results": [asdict(r) for r in results],
+        "invalid_genes": invalid_genes,
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8000)
