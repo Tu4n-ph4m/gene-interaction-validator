@@ -1,18 +1,29 @@
 """Conversational interface to the gene interaction network finder.
 
-A small agentic loop: Claude has one tool, find_gene_interactions, and
-extracts the gene list / tissue / species from whatever the user typed in
-plain English, then writes a short conversational reply. The full
-StringDB/BioGRID result table (which can be large) never goes into the
-model's context -- only a capped summary does. The caller gets the full
-table back separately for rendering in the UI.
+Two explicit agents:
 
-History is kept as plain {role, content} text turns (no tool_use/
-tool_result blocks persisted across turns) -- each turn's tool round-trip
-is internal to that turn. This is a deliberate simplification: enough for
-natural follow-ups ("now check those in brain tissue") since gene names
-typically appear in the assistant's own prior reply, without the
-complexity of replaying full tool-call history every turn.
+  Planner agent  -- talks to the user, asks clarifying questions, never
+                    touches data directly. When it has enough information,
+                    it delegates the lookup to the executor via the
+                    delegate_lookup tool, then explains the executor's
+                    factual report back to the user conversationally.
+
+  Executor agent -- has the only access to find_gene_interactions. Given a
+                    delegated task (genes/tissue/species), it calls the
+                    tool and reports back factually (not conversationally)
+                    -- its report is consumed by the planner, not the user.
+
+The full StringDB/BioGRID result table (which can be large) never goes
+into either model's context -- only a capped summary does, computed in
+Python. The caller gets the full table back separately for rendering in
+the UI.
+
+History is kept as plain {role, content} text turns for the planner only
+(no tool_use/tool_result blocks persisted across turns -- each turn's
+planner<->executor round-trip is internal to that turn). This is a
+deliberate simplification: enough for natural follow-ups ("now check those
+in brain tissue") via a hidden context note (see chat_turn's docstring),
+without the complexity of replaying full tool-call history every turn.
 """
 
 from __future__ import annotations
@@ -32,49 +43,100 @@ load_dotenv()
 
 MODEL = os.environ.get("GENE_VALIDATOR_MODEL", "claude-opus-4-8")
 MAX_AGENT_ITERATIONS = 6
+MAX_EXECUTOR_ITERATIONS = 3
 MAX_TOP_PAIRS_IN_SUMMARY = 12
+# Generous: a tool_use call for a large gene list (e.g. 1000 genes) needs
+# several thousand output tokens just to write out the JSON array argument.
+# Too low a limit truncates the call mid-argument (stop_reason="max_tokens"),
+# silently producing an empty/partial input instead of an error.
+MAX_TOKENS = 8192
 
-SYSTEM_PROMPT = """\
+TOO_LARGE_MESSAGE = (
+    "That gene list is too large for me to process in one request -- "
+    "try splitting it into smaller batches."
+)
+
+# --- Planner agent -----------------------------------------------------
+
+PLANNER_SYSTEM_PROMPT = """\
 You are a friendly research assistant that helps people explore gene-gene \
 interaction networks via StringDB and BioGRID, optionally scoped to a \
 tissue/cell type via the Human Protein Atlas.
 
-You have one tool, find_gene_interactions(genes, tissue, species). Call it \
-whenever the user names a set of genes (2 or more) they want checked for \
-interactions -- extract the gene symbols, tissue/cell type (if mentioned), \
-and species (if mentioned, otherwise default to human) from their message, \
-even if phrased casually ("do BRCA1, BRCA2 and TP53 interact in liver?").
+You don't have direct access to any data yourself. A separate execution \
+agent does the actual lookups. Your job is purely conversational:
 
-If the user names fewer than 2 genes, or hasn't named any genes yet, ask a \
-short clarifying question instead of calling the tool.
+1. Understand what the user wants. If they've named 2+ genes, extract the \
+gene symbols, tissue/cell type (if mentioned), and species (if mentioned, \
+otherwise default to human) -- even if phrased casually ("do BRCA1, BRCA2 \
+and TP53 interact in liver?").
+2. If they've named fewer than 2 genes, or it's not clear what they want \
+yet, ask a short clarifying question instead of delegating.
+3. Once you have enough information, call delegate_lookup(genes, tissue, \
+species) to hand the task to the execution agent.
+4. When the execution agent reports back, write a brief, conversational \
+reply (a few sentences, not a report) for the user based on that report -- \
+mention the most notable pairs, whether sources agree, and any caveats \
+only if they're notable. The full results table is shown separately in \
+the UI, so don't enumerate every pair -- highlight what's interesting and \
+let the table carry the detail. If the user asked for a specific subset \
+(e.g. "StringDB-only pairs"), make sure your reply reflects exactly that \
+subset, using the report's data -- don't substitute a different ranking.
 
 Follow-up requests (e.g. "now check those in liver", "just the StringDB-only \
 ones", "what about EGFR too") refer back to the genes from the conversation \
 so far. If you can identify the exact gene list from earlier in this \
-conversation, call the tool again with that list (plus whatever changed -- \
-new tissue, added gene, etc.) rather than answering from memory of the \
-earlier summary, since that summary may not have included every gene or \
-pair. If you cannot identify the exact gene list (e.g. it was never fully \
-stated, or this is a fresh conversation with no prior gene-list turn), ask \
-the user to restate it -- do not guess and do not say you'll do something \
-without doing it.
+conversation, delegate again with that list (plus whatever changed) rather \
+than answering from memory of an earlier summary, which may not have \
+enumerated every gene. If you cannot identify the exact gene list, ask the \
+user to restate it -- do not guess.
 
 CRITICAL: never produce a reply like "let me check that" or "I'll run the \
-full panel" as your final answer. Either call the tool in this same turn, \
-or ask a clarifying question. A reply that promises an action but takes \
-none leaves the user with nothing -- that is worse than asking a question.
+full panel" as your final answer. Either call delegate_lookup in this same \
+turn, or ask a clarifying question. A reply that promises an action but \
+takes none leaves the user with nothing -- that is worse than asking a \
+question.
+"""
 
-After the tool returns, write a brief, conversational summary (a few \
-sentences, not a report) -- mention the most notable pairs, whether sources \
-agree, and any caveats (genes that didn't resolve, tissue-expression flags, \
-or curated-database overlap risk) only if they're notable. The full results \
-table is shown separately in the UI, so don't try to enumerate every pair \
-in your reply -- highlight what's interesting and let the table carry the \
-detail. If the user asked for a specific subset (e.g. "StringDB-only \
-pairs" -- meaning string_interaction_found is true and \
-biogrid_interaction_found is false), filter to exactly that subset in your \
-summary; don't substitute a different ranking (like "sorted by score") for \
-what was actually asked.
+DELEGATE_TOOL = {
+    "name": "delegate_lookup",
+    "description": (
+        "Hand off a gene-interaction lookup to the execution agent, which "
+        "will query StringDB/BioGRID and report back factually."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "genes": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Gene symbols to check, e.g. ['BRCA1', 'BRCA2', 'TP53']",
+            },
+            "tissue": {
+                "type": "string",
+                "description": "Tissue or cell type to check expression context for, if mentioned.",
+            },
+            "species": {
+                "type": "string",
+                "description": "Species name (human, mouse, etc.) or NCBI taxonomy ID. Default human.",
+            },
+        },
+        "required": ["genes"],
+    },
+}
+
+# --- Executor agent ------------------------------------------------------
+
+EXECUTOR_SYSTEM_PROMPT = """\
+You are an execution agent for gene-interaction lookups. You have one tool, \
+find_gene_interactions(genes, tissue, species). You will be given a task \
+naming the exact genes/tissue/species to look up -- call the tool with \
+those exact parameters, then report the results back factually: pair \
+counts, notable high/low-confidence pairs, and any caveats (unresolved \
+genes, tissue-expression flags, curated-database overlap risk). Your report \
+goes to another agent, not the end user, so be precise and data-dense \
+rather than conversational. If the tool call fails, report the failure \
+plainly so the planner agent can relay it.
 """
 
 FIND_INTERACTIONS_TOOL = {
@@ -141,27 +203,98 @@ def _summarize_for_model(results: list, invalid_genes: list) -> str:
     return json.dumps(summary)
 
 
+def _run_executor_agent(
+    genes: List[str], tissue: Optional[str], species: Optional[str]
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Agent 2: the only one that actually calls find_gene_interactions.
+
+    Returns (factual_report, results_payload). results_payload is None if
+    the tool was never successfully called (e.g. hit the iteration limit).
+    """
+    client = anthropic.Anthropic()
+    task = (
+        f"Look up interactions for genes={genes!r}, tissue={tissue!r}, "
+        f"species={species!r}."
+    )
+    messages: List[Dict[str, Any]] = [{"role": "user", "content": task}]
+    results_payload: Optional[Dict[str, Any]] = None
+
+    for _ in range(MAX_EXECUTOR_ITERATIONS):
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            system=EXECUTOR_SYSTEM_PROMPT,
+            tools=[FIND_INTERACTIONS_TOOL],
+            messages=messages,
+        )
+
+        if response.stop_reason == "max_tokens":
+            return TOO_LARGE_MESSAGE, results_payload
+
+        if response.stop_reason != "tool_use":
+            text = "".join(b.text for b in response.content if b.type == "text")
+            return text, results_payload
+
+        messages.append({"role": "assistant", "content": response.content})
+
+        tool_results = []
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+            is_error = False
+            if block.name == "find_gene_interactions":
+                try:
+                    results, invalid_genes = _run_find_interactions(**block.input)
+                except Exception as exc:  # upstream API hiccup -- recover, don't crash the turn
+                    is_error = True
+                    tool_result_str = (
+                        f"Lookup failed due to an upstream error: {exc}. "
+                        "Report this failure plainly."
+                    )
+                else:
+                    results_payload = {
+                        "results": [asdict(r) for r in results],
+                        "invalid_genes": invalid_genes,
+                    }
+                    tool_result_str = _summarize_for_model(results, invalid_genes)
+            else:
+                is_error = True
+                tool_result_str = json.dumps({"error": f"unknown tool {block.name}"})
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": tool_result_str,
+                    "is_error": is_error,
+                }
+            )
+        messages.append({"role": "user", "content": tool_results})
+
+    return "Execution agent could not complete the lookup in time.", results_payload
+
+
 def chat_turn(
     message: str, history: Iterable[Dict[str, str]]
 ) -> Tuple[str, Optional[Dict[str, Any]], str]:
-    """Run one chat turn.
+    """Run one chat turn through the planner agent, which may delegate to
+    the executor agent.
 
     `history` is the prior turns as plain {"role": "user"|"assistant",
-    "content": str} dicts. Each assistant entry should be the *history_content*
-    returned by a previous call (not necessarily the same as what was shown
-    to the user) -- see the third return value below.
+    "content": str} dicts -- planner-facing only. Each assistant entry
+    should be the *history_content* returned by a previous call (not
+    necessarily the same as what was shown to the user) -- see the third
+    return value below.
 
     Returns (reply_text, results_payload, history_content).
       - reply_text: what to show the user in the chat UI.
-      - results_payload: None if no tool call happened this turn, else
+      - results_payload: None if no lookup happened this turn, else
         {"results": [...], "invalid_genes": [...]}.
       - history_content: what the caller should store as this turn's
-        assistant content for future chat_turn() calls. When a tool was
-        called, this is reply_text plus a hidden note recording the exact
-        genes/tissue/species used, so follow-ups ("just the StringDB-only
-        ones") can be answered by re-querying the same gene set instead of
-        the model trying to recall it from its own prior summary (which may
-        not have enumerated every gene, especially for large panels).
+        assistant content for future chat_turn() calls. When a lookup was
+        delegated, this is reply_text plus a hidden note recording the
+        exact genes/tissue/species used, so follow-ups ("just the
+        StringDB-only ones") can be answered by re-delegating with the same
+        gene set instead of the planner guessing from prose memory.
     """
     client = anthropic.Anthropic()
     messages: List[Dict[str, Any]] = [
@@ -175,25 +308,15 @@ def chat_turn(
     for _ in range(MAX_AGENT_ITERATIONS):
         response = client.messages.create(
             model=MODEL,
-            # Generous budget: a tool_use call for a large gene list (e.g.
-            # 1000 genes) needs several thousand output tokens just to write
-            # out the JSON array argument. Too low a limit here truncates
-            # the tool call mid-argument (stop_reason="max_tokens"), which
-            # silently produces an empty/partial "genes" list instead of an
-            # error -- this previously caused the agent to "narrate" an
-            # action it never actually took.
-            max_tokens=8192,
-            system=SYSTEM_PROMPT,
-            tools=[FIND_INTERACTIONS_TOOL],
+            max_tokens=MAX_TOKENS,
+            system=PLANNER_SYSTEM_PROMPT,
+            tools=[DELEGATE_TOOL],
             messages=messages,
         )
 
         if response.stop_reason == "max_tokens":
-            return (
-                "That gene list is too large for me to process in one request -- "
-                "try splitting it into smaller batches.",
-                results_payload,
-                "(a request was truncated for being too large; ask the user to split the gene list)",
+            return TOO_LARGE_MESSAGE, results_payload, (
+                "(a request was truncated for being too large; ask the user to split the gene list)"
             )
 
         if response.stop_reason != "tool_use":
@@ -214,26 +337,19 @@ def chat_turn(
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            is_error = False
-            if block.name == "find_gene_interactions":
-                try:
-                    results, invalid_genes = _run_find_interactions(**block.input)
-                except Exception as exc:  # upstream API hiccup -- let the model recover, don't crash the turn
-                    is_error = True
-                    tool_result_str = (
-                        f"Lookup failed due to an upstream error: {exc}. "
-                        "Tell the user briefly and suggest trying again."
-                    )
-                else:
-                    results_payload = {
-                        "results": [asdict(r) for r in results],
-                        "invalid_genes": invalid_genes,
-                    }
-                    last_query = dict(block.input)
-                    tool_result_str = _summarize_for_model(results, invalid_genes)
+            if block.name == "delegate_lookup":
+                genes = block.input.get("genes", [])
+                tissue = block.input.get("tissue")
+                species = block.input.get("species")
+                executor_report, executor_results = _run_executor_agent(genes, tissue, species)
+                if executor_results is not None:
+                    results_payload = executor_results
+                    last_query = {"genes": genes, "tissue": tissue, "species": species}
+                tool_result_str = executor_report
+                is_error = executor_results is None
             else:
-                is_error = True
                 tool_result_str = json.dumps({"error": f"unknown tool {block.name}"})
+                is_error = True
             tool_results.append(
                 {
                     "type": "tool_result",
