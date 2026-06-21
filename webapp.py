@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from gene_validator.batch import validate_gene_network
+from gene_validator.chat import chat_turn
 from gene_validator.species import SPECIES_DISPLAY_OPTIONS, resolve_species
 
 load_dotenv()
@@ -34,6 +35,16 @@ class NetworkRequest(BaseModel):
     genes: List[str] = Field(..., min_length=2)
     tissue: Optional[str] = None
     species: Optional[str] = "human"
+
+
+class ChatTurn(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    history: List[ChatTurn] = Field(default_factory=list)
 
 
 @app.get("/")
@@ -72,6 +83,26 @@ def network(req: NetworkRequest) -> dict:
         "results": [asdict(r) for r in results],
         "invalid_genes": invalid_genes,
     }
+
+
+@app.post("/api/chat")
+def chat(req: ChatRequest) -> dict:
+    if not os.environ.get("ANTHROPIC_API_KEY") or not os.environ.get("BIOGRID_ACCESS_KEY"):
+        raise HTTPException(
+            status_code=500,
+            detail="Server is missing ANTHROPIC_API_KEY/BIOGRID_ACCESS_KEY -- check .env.",
+        )
+
+    try:
+        reply, results_payload = chat_turn(
+            req.message, [turn.model_dump() for turn in req.history]
+        )
+    except ValueError as exc:  # e.g. an unresolvable species name extracted from chat
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Chat turn failed: {exc}") from exc
+
+    return {"reply": reply, "results": results_payload}
 
 
 if __name__ == "__main__":

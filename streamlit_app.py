@@ -1,7 +1,8 @@
-"""Interactive frontend for the gene-gene interaction validation agent.
+"""Conversational frontend for the gene interaction network finder.
 
-Input: a list of genes. Output: every interacting pair found among them,
-with clickable links to the StringDB/BioGRID source records.
+Chat with the agent in plain English -- it extracts genes/tissue/species
+from your message, finds real StringDB/BioGRID interactions, and writes a
+short conversational reply plus a results table.
 
 Run locally:
     streamlit run streamlit_app.py
@@ -14,7 +15,6 @@ os.environ directly) works unchanged in both environments.
 
 import os
 import re
-from dataclasses import asdict
 
 import pandas as pd
 import streamlit as st
@@ -23,110 +23,121 @@ for _key in ("ANTHROPIC_API_KEY", "BIOGRID_ACCESS_KEY"):
     if _key in st.secrets:
         os.environ[_key] = st.secrets[_key]
 
-from gene_validator.batch import validate_gene_network  # noqa: E402
-from gene_validator.species import SPECIES_DISPLAY_OPTIONS, resolve_species  # noqa: E402
+from gene_validator.chat import chat_turn  # noqa: E402
 
-st.set_page_config(page_title="Gene Interaction Network", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="Gene Interaction Chat", page_icon="🧬", layout="centered")
 
-st.title("🧬 Gene Interaction Network Finder")
+st.title("🧬 Gene Interaction Chat")
 st.caption(
-    "Paste a list of genes. Finds every interacting pair among them via "
-    "StringDB and BioGRID, with links to the source records. Optionally "
-    "scope to a tissue/cell type via the Human Protein Atlas."
+    'Ask in plain English -- e.g. "do BRCA1, BRCA2, and TP53 interact in liver?" -- '
+    "or attach a gene list file below."
 )
 
-with st.form("network_form"):
-    genes_text = st.text_area(
-        "Genes (comma, space, or newline separated)",
-        placeholder="BRCA1, BRCA2, TP53, EGFR, MYC, PTEN",
-        height=140,
+if "messages" not in st.session_state:
+    st.session_state.messages = []  # [{"role", "content", "results": optional dict}]
+if "last_file_name" not in st.session_state:
+    st.session_state.last_file_name = None
+
+
+def render_results_table(results_payload: dict) -> None:
+    invalid_genes = results_payload.get("invalid_genes") or []
+    if invalid_genes:
+        st.warning(f"Could not resolve: {', '.join(invalid_genes)}")
+
+    rows = results_payload.get("results") or []
+    if not rows:
+        st.caption("No interactions found among the resolved genes.")
+        return
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values("string_combined_score", ascending=False, na_position="last")
+    display_df = df[
+        [
+            "gene1",
+            "gene2",
+            "verdict",
+            "string_combined_score",
+            "string_curated_overlap_risk",
+            "biogrid_evidence_count",
+            "string_source_url",
+            "biogrid_source_url",
+        ]
+    ].rename(
+        columns={
+            "gene1": "Gene 1",
+            "gene2": "Gene 2",
+            "verdict": "Verdict",
+            "string_combined_score": "StringDB Score",
+            "string_curated_overlap_risk": "Curated-Overlap Risk",
+            "biogrid_evidence_count": "BioGRID Evidence #",
+            "string_source_url": "StringDB Link",
+            "biogrid_source_url": "BioGRID Link",
+        }
     )
-    gene_file = st.file_uploader(
-        "Or upload a file (.txt or .csv, one gene per line or comma-separated)",
-        type=["txt", "csv"],
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "StringDB Link": st.column_config.LinkColumn("StringDB", display_text="View ↗"),
+            "BioGRID Link": st.column_config.LinkColumn("BioGRID", display_text="View ↗"),
+        },
     )
-    col1, col2 = st.columns(2)
-    tissue = col1.text_input(
-        "Tissue / cell type (optional)", placeholder="liver, prostate, bone marrow, ..."
-    ).strip()
-    species_name = col2.selectbox("Species", SPECIES_DISPLAY_OPTIONS, index=0)
-    submitted = st.form_submit_button("Find interactions", use_container_width=True)
 
-if submitted:
-    source_text = gene_file.read().decode("utf-8") if gene_file else genes_text
-    genes = [g for g in re.split(r"[,\s]+", source_text.strip()) if g]
-    if gene_file:
-        st.caption(f"Loaded {len(genes)} gene(s) from {gene_file.name}.")
-    if len(genes) < 2:
-        st.error("Enter at least 2 gene symbols.")
-    elif not os.environ.get("BIOGRID_ACCESS_KEY"):
-        st.error("BIOGRID_ACCESS_KEY is not configured for this app.")
-    else:
-        species_tax_id = resolve_species(species_name)
-        with st.spinner(f"Querying StringDB + BioGRID for {len(genes)} genes..."):
-            try:
-                results, invalid_genes = validate_gene_network(
-                    genes, species_tax_id, tissue or None
-                )
-            except Exception as exc:
-                st.error(f"Lookup failed: {exc}")
-                results, invalid_genes = [], []
+    caveat_rows = df[df["notes"].str.contains("CAVEAT", na=False)]
+    if not caveat_rows.empty:
+        with st.expander(f"⚠️ {len(caveat_rows)} pair(s) flagged with a tissue/independence caveat"):
+            for _, row in caveat_rows.iterrows():
+                st.write(f"**{row['gene1']} ↔ {row['gene2']}**: {row['notes']}")
 
-        if invalid_genes:
-            st.warning(f"Could not resolve {len(invalid_genes)} gene(s): {', '.join(invalid_genes)}")
+    st.download_button(
+        "Download full results (CSV)",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name="gene_interaction_network.csv",
+        mime="text/csv",
+        key=f"download-{id(results_payload)}",
+    )
 
-        if not results:
-            st.info("No interactions found among the resolved genes.")
-        else:
-            df = pd.DataFrame([asdict(r) for r in results])
-            df = df.sort_values("string_combined_score", ascending=False, na_position="last")
 
-            display_df = df[
-                [
-                    "gene1",
-                    "gene2",
-                    "verdict",
-                    "string_combined_score",
-                    "string_curated_overlap_risk",
-                    "biogrid_evidence_count",
-                    "string_source_url",
-                    "biogrid_source_url",
-                ]
-            ].rename(
-                columns={
-                    "gene1": "Gene 1",
-                    "gene2": "Gene 2",
-                    "verdict": "Verdict",
-                    "string_combined_score": "StringDB Score",
-                    "string_curated_overlap_risk": "Curated-Overlap Risk",
-                    "biogrid_evidence_count": "BioGRID Evidence #",
-                    "string_source_url": "StringDB Link",
-                    "biogrid_source_url": "BioGRID Link",
-                }
-            )
+def run_turn(message: str) -> None:
+    if not os.environ.get("BIOGRID_ACCESS_KEY"):
+        st.session_state.messages.append(
+            {"role": "assistant", "content": "BIOGRID_ACCESS_KEY is not configured for this app."}
+        )
+        return
 
-            st.success(f"Found {len(results)} interacting pairs among {len(genes) - len(invalid_genes)} genes.")
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "StringDB Link": st.column_config.LinkColumn("StringDB", display_text="View ↗"),
-                    "BioGRID Link": st.column_config.LinkColumn("BioGRID", display_text="View ↗"),
-                },
-            )
+    text_history = [
+        {"role": m["role"], "content": m["content"]} for m in st.session_state.messages
+    ]
+    st.session_state.messages.append({"role": "user", "content": message})
 
-            if tissue:
-                caveat_rows = df[df["notes"].str.contains("CAVEAT", na=False)]
-                if not caveat_rows.empty:
-                    with st.expander(f"⚠️ {len(caveat_rows)} pair(s) flagged with a tissue/independence caveat"):
-                        for _, row in caveat_rows.iterrows():
-                            st.write(f"**{row['gene1']} ↔ {row['gene2']}**: {row['notes']}")
+    with st.spinner("Thinking..."):
+        try:
+            reply, results_payload = chat_turn(message, text_history)
+        except Exception as exc:
+            reply, results_payload = f"Something went wrong: {exc}", None
 
-            csv_bytes = df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "Download full results (CSV)",
-                data=csv_bytes,
-                file_name="gene_interaction_network.csv",
-                mime="text/csv",
-            )
+    st.session_state.messages.append(
+        {"role": "assistant", "content": reply, "results": results_payload}
+    )
+
+
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+        if msg.get("results"):
+            render_results_table(msg["results"])
+
+gene_file = st.file_uploader(
+    "Attach a gene list file (.txt or .csv)", type=["txt", "csv"], label_visibility="collapsed"
+)
+if gene_file and gene_file.name != st.session_state.last_file_name:
+    st.session_state.last_file_name = gene_file.name
+    genes = [g for g in re.split(r"[,\s]+", gene_file.read().decode("utf-8").strip()) if g]
+    if genes:
+        run_turn(f"Find interactions among these genes: {', '.join(genes)}.")
+        st.rerun()
+
+if user_message := st.chat_input("Type a message..."):
+    run_turn(user_message)
+    st.rerun()

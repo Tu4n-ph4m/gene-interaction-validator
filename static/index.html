@@ -3,44 +3,31 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Gene Interaction Network Finder</title>
+  <title>Gene Interaction Chat</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <main>
-    <h1>🧬 Gene Interaction Network Finder</h1>
+  <main class="chat-main">
+    <h1>🧬 Gene Interaction Chat</h1>
     <p class="subtitle">
-      Paste a list of genes. Finds every interacting pair among them via StringDB and
-      BioGRID, with links to the source records. Optionally scope to a tissue/cell type
-      via the Human Protein Atlas.
+      Ask in plain English -- e.g. "do BRCA1, BRCA2, and TP53 interact in liver?" I'll find
+      real interactions via StringDB and BioGRID, with a tissue check via the Human Protein
+      Atlas when you mention one.
     </p>
 
-    <form id="network-form">
-      <label for="genes">Genes (comma, space, or newline separated)</label>
-      <textarea id="genes" rows="5" placeholder="BRCA1, BRCA2, TP53, EGFR, MYC, PTEN"></textarea>
-
-      <label for="gene-file">Or upload a file (.txt or .csv, one gene per line or comma-separated)</label>
-      <input id="gene-file" type="file" accept=".txt,.csv,text/plain,text/csv" />
-      <div id="file-info" class="file-info"></div>
-
-      <div class="row">
-        <div class="field">
-          <label for="tissue">Tissue / cell type (optional)</label>
-          <input id="tissue" type="text" placeholder="liver, prostate, bone marrow, ..." />
-        </div>
-        <div class="field">
-          <label for="species">Species</label>
-          <select id="species">
-            <option value="Human" selected>Human</option>
-          </select>
-        </div>
+    <div id="chat-log" class="chat-log">
+      <div class="msg msg-assistant">
+        Hi! Give me a list of two or more genes -- and optionally a tissue/cell type or
+        species -- and I'll check for known interactions. You can also attach a file
+        instead of typing the gene list.
       </div>
+    </div>
 
-      <button type="submit" id="submit-btn">Find interactions</button>
+    <form id="chat-form" class="chat-input-row">
+      <input id="gene-file" type="file" accept=".txt,.csv,text/plain,text/csv" title="Attach a gene list file" />
+      <input id="chat-input" type="text" placeholder="Type a message..." autocomplete="off" />
+      <button type="submit" id="send-btn">Send</button>
     </form>
-
-    <div id="status"></div>
-    <div id="results"></div>
   </main>
 
   <script src="/static/app.js"></script>

@@ -1,56 +1,14 @@
-const form = document.getElementById("network-form");
-const submitBtn = document.getElementById("submit-btn");
-const statusEl = document.getElementById("status");
-const resultsEl = document.getElementById("results");
-const speciesSelect = document.getElementById("species");
+const chatLog = document.getElementById("chat-log");
+const chatForm = document.getElementById("chat-form");
+const chatInput = document.getElementById("chat-input");
+const sendBtn = document.getElementById("send-btn");
 const geneFileInput = document.getElementById("gene-file");
-const fileInfoEl = document.getElementById("file-info");
-const genesTextarea = document.getElementById("genes");
-
-let lastResults = [];
 
 const MAX_GENE_FILE_BYTES = 5 * 1024 * 1024; // 5MB is generous for a gene list
 
-geneFileInput.addEventListener("change", () => {
-  const file = geneFileInput.files[0];
-  fileInfoEl.textContent = "";
-  if (!file) return;
-
-  if (file.size > MAX_GENE_FILE_BYTES) {
-    fileInfoEl.textContent = `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB, max 5 MB).`;
-    geneFileInput.value = "";
-    return;
-  }
-
-  const reader = new FileReader();
-  reader.onload = () => {
-    const genes = splitGenes(String(reader.result));
-    if (!genes.length) {
-      fileInfoEl.textContent = "No gene symbols found in that file.";
-      return;
-    }
-    genesTextarea.value = genes.join(", ");
-    fileInfoEl.textContent = `Loaded ${genes.length} gene(s) from ${file.name}.`;
-  };
-  reader.onerror = () => {
-    fileInfoEl.textContent = `Could not read ${file.name}.`;
-  };
-  reader.readAsText(file);
-});
-
-async function loadSpeciesOptions() {
-  try {
-    const resp = await fetch("/api/species");
-    if (!resp.ok) return;
-    const data = await resp.json();
-    speciesSelect.innerHTML = data.options
-      .map((name) => `<option value="${name}">${name}</option>`)
-      .join("");
-  } catch {
-    // Keep the static "Human" fallback already in the HTML.
-  }
-}
-loadSpeciesOptions();
+let history = []; // [{role: "user"|"assistant", content: string}]
+let pendingFileGenes = null;
+let pendingFileName = null;
 
 function splitGenes(text) {
   return text
@@ -59,44 +17,66 @@ function splitGenes(text) {
     .filter(Boolean);
 }
 
-function setStatus(html, cls) {
-  statusEl.innerHTML = html ? `<div class="status-${cls}">${html}</div>` : "";
-}
-
 function escapeHtml(str) {
   const div = document.createElement("div");
   div.textContent = str ?? "";
   return div.innerHTML;
 }
 
-function renderResults(results, invalidGenes, totalGenes) {
-  resultsEl.innerHTML = "";
+function scrollToBottom() {
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
 
-  if (invalidGenes.length) {
-    setStatus(
-      `Could not resolve ${invalidGenes.length} gene(s): ${escapeHtml(invalidGenes.join(", "))}`,
-      "warn"
-    );
-  }
+function appendMessage(role, html) {
+  const div = document.createElement("div");
+  div.className = `msg msg-${role}`;
+  div.innerHTML = html;
+  chatLog.appendChild(div);
+  scrollToBottom();
+  return div;
+}
 
-  if (!results.length) {
-    resultsEl.innerHTML = "<p>No interactions found among the resolved genes.</p>";
+geneFileInput.addEventListener("change", () => {
+  const file = geneFileInput.files[0];
+  pendingFileGenes = null;
+  pendingFileName = null;
+  if (!file) return;
+
+  if (file.size > MAX_GENE_FILE_BYTES) {
+    appendMessage("assistant", `⚠️ "${escapeHtml(file.name)}" is too large (max 5 MB).`);
+    geneFileInput.value = "";
     return;
   }
 
-  const resolvedCount = totalGenes - invalidGenes.length;
-  const successMsg = `Found ${results.length} interacting pairs among ${resolvedCount} genes.`;
-  if (!invalidGenes.length) setStatus(successMsg, "success");
-  else statusEl.insertAdjacentHTML("beforeend", `<div class="status-success">${successMsg}</div>`);
+  const reader = new FileReader();
+  reader.onload = () => {
+    const genes = splitGenes(String(reader.result));
+    if (!genes.length) {
+      appendMessage("assistant", `⚠️ No gene symbols found in "${escapeHtml(file.name)}".`);
+      geneFileInput.value = "";
+      return;
+    }
+    pendingFileGenes = genes;
+    pendingFileName = file.name;
+    chatInput.placeholder = `${genes.length} genes loaded from ${file.name} -- add a tissue/species, or just press Send`;
+  };
+  reader.onerror = () => {
+    appendMessage("assistant", `⚠️ Could not read "${escapeHtml(file.name)}".`);
+  };
+  reader.readAsText(file);
+});
+
+function renderResultsTable(results) {
+  const wrapper = document.createElement("div");
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "toolbar";
+  toolbar.innerHTML = `<span></span><button class="download-btn">Download CSV</button>`;
+  wrapper.appendChild(toolbar);
 
   const sorted = [...results].sort(
     (a, b) => (b.string_combined_score ?? -1) - (a.string_combined_score ?? -1)
   );
-
-  const toolbar = document.createElement("div");
-  toolbar.className = "toolbar";
-  toolbar.innerHTML = `<span></span><button id="download-btn">Download CSV</button>`;
-  resultsEl.appendChild(toolbar);
 
   const table = document.createElement("table");
   table.innerHTML = `
@@ -125,7 +105,7 @@ function renderResults(results, invalidGenes, totalGenes) {
     `;
     tbody.appendChild(tr);
   }
-  resultsEl.appendChild(table);
+  wrapper.appendChild(table);
 
   const caveatRows = results.filter((r) => (r.notes || "").includes("CAVEAT"));
   if (caveatRows.length) {
@@ -139,10 +119,11 @@ function renderResults(results, invalidGenes, totalGenes) {
       ul.appendChild(li);
     }
     details.appendChild(ul);
-    resultsEl.appendChild(details);
+    wrapper.appendChild(details);
   }
 
-  document.getElementById("download-btn").addEventListener("click", () => downloadCsv(results));
+  wrapper.querySelector(".download-btn").addEventListener("click", () => downloadCsv(results));
+  return wrapper;
 }
 
 function downloadCsv(results) {
@@ -162,28 +143,33 @@ function downloadCsv(results) {
   URL.revokeObjectURL(url);
 }
 
-form.addEventListener("submit", async (e) => {
+chatForm.addEventListener("submit", async (e) => {
   e.preventDefault();
 
-  const genes = splitGenes(document.getElementById("genes").value);
-  const tissue = document.getElementById("tissue").value.trim() || null;
-  const species = speciesSelect.value || "human";
-
-  if (genes.length < 2) {
-    setStatus("Enter at least 2 gene symbols.", "error");
-    return;
+  let message = chatInput.value.trim();
+  if (pendingFileGenes) {
+    const genePhrase = `Genes from ${pendingFileName}: ${pendingFileGenes.join(", ")}.`;
+    message = message ? `${genePhrase} ${message}` : `Find interactions among these genes: ${pendingFileGenes.join(", ")}.`;
   }
+  if (!message) return;
 
-  submitBtn.disabled = true;
-  submitBtn.textContent = `Querying StringDB + BioGRID for ${genes.length} genes...`;
-  setStatus("", "");
-  resultsEl.innerHTML = "";
+  appendMessage("user", escapeHtml(chatInput.value.trim() || `(attached ${pendingFileName})`));
+
+  chatInput.value = "";
+  chatInput.placeholder = "Type a message...";
+  geneFileInput.value = "";
+  pendingFileGenes = null;
+  pendingFileName = null;
+
+  sendBtn.disabled = true;
+  chatInput.disabled = true;
+  const thinkingMsg = appendMessage("assistant thinking", "Thinking...");
 
   try {
-    const resp = await fetch("/api/network", {
+    const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ genes, tissue, species }),
+      body: JSON.stringify({ message, history }),
     });
 
     if (!resp.ok) {
@@ -192,12 +178,33 @@ form.addEventListener("submit", async (e) => {
     }
 
     const data = await resp.json();
-    lastResults = data.results;
-    renderResults(data.results, data.invalid_genes, genes.length);
+    thinkingMsg.remove();
+    const bubble = appendMessage("assistant", escapeHtml(data.reply).replace(/\n/g, "<br>"));
+
+    if (data.results) {
+      if (data.results.invalid_genes && data.results.invalid_genes.length) {
+        const warn = document.createElement("p");
+        warn.className = "status-warn";
+        warn.textContent = `Could not resolve: ${data.results.invalid_genes.join(", ")}`;
+        bubble.appendChild(warn);
+      }
+      if (data.results.results && data.results.results.length) {
+        bubble.appendChild(renderResultsTable(data.results.results));
+      } else {
+        const none = document.createElement("p");
+        none.textContent = "No interactions found among the resolved genes.";
+        bubble.appendChild(none);
+      }
+    }
+
+    history.push({ role: "user", content: message });
+    history.push({ role: "assistant", content: data.reply });
   } catch (err) {
-    setStatus(escapeHtml(err.message), "error");
+    thinkingMsg.remove();
+    appendMessage("assistant error", `⚠️ ${escapeHtml(err.message)}`);
   } finally {
-    submitBtn.disabled = false;
-    submitBtn.textContent = "Find interactions";
+    sendBtn.disabled = false;
+    chatInput.disabled = false;
+    chatInput.focus();
   }
 });
