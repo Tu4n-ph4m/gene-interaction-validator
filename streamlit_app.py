@@ -1,5 +1,8 @@
 """Interactive frontend for the gene-gene interaction validation agent.
 
+Input: a list of genes. Output: every interacting pair found among them,
+with clickable links to the StringDB/BioGRID source records.
+
 Run locally:
     streamlit run streamlit_app.py
 
@@ -10,73 +13,113 @@ os.environ directly) works unchanged in both environments.
 """
 
 import os
+import re
+from dataclasses import asdict
 
+import pandas as pd
 import streamlit as st
 
 for _key in ("ANTHROPIC_API_KEY", "BIOGRID_ACCESS_KEY"):
     if _key in st.secrets:
         os.environ[_key] = st.secrets[_key]
 
-from gene_validator.agent import validate_gene_pair_stream  # noqa: E402
+from gene_validator.batch import validate_gene_network  # noqa: E402
 
-st.set_page_config(page_title="Gene Interaction Validator", page_icon="🧬", layout="centered")
+st.set_page_config(page_title="Gene Interaction Network", page_icon="🧬", layout="wide")
 
-st.title("🧬 Gene-Gene Interaction Validator")
+st.title("🧬 Gene Interaction Network Finder")
 st.caption(
-    "An agentic loop cross-validates a gene pair against StringDB, BioGRID, "
-    "and (optionally) tissue expression via the Human Protein Atlas."
+    "Paste a list of genes. Finds every interacting pair among them via "
+    "StringDB and BioGRID, with links to the source records. Optionally "
+    "scope to a tissue/cell type via the Human Protein Atlas."
 )
 
-with st.form("validate_form"):
+with st.form("network_form"):
+    genes_text = st.text_area(
+        "Genes (comma, space, or newline separated)",
+        placeholder="BRCA1, BRCA2, TP53, EGFR, MYC, PTEN",
+        height=140,
+    )
     col1, col2 = st.columns(2)
-    gene1 = col1.text_input("Gene 1", placeholder="BRCA1").strip()
-    gene2 = col2.text_input("Gene 2", placeholder="BRCA2").strip()
-    tissue = st.text_input(
-        "Tissue / cell type (optional)",
-        placeholder="liver, prostate, bone marrow, ...",
+    tissue = col1.text_input(
+        "Tissue / cell type (optional)", placeholder="liver, prostate, bone marrow, ..."
     ).strip()
-    species_tax_id = st.number_input(
+    species_tax_id = col2.number_input(
         "Species NCBI taxonomy ID", value=9606, step=1, help="9606 = human"
     )
-    submitted = st.form_submit_button("Validate", use_container_width=True)
-
-TOOL_LABELS = {
-    "resolve_gene": "🔎 Resolving gene identifier",
-    "check_string_interaction": "🧪 Checking StringDB",
-    "check_biogrid_interaction": "🧫 Checking BioGRID",
-    "check_tissue_expression": "🧬 Checking tissue expression (HPA)",
-}
+    submitted = st.form_submit_button("Find interactions", use_container_width=True)
 
 if submitted:
-    if not gene1 or not gene2:
-        st.error("Please enter both gene symbols.")
-    elif not os.environ.get("ANTHROPIC_API_KEY"):
-        st.error("ANTHROPIC_API_KEY is not configured for this app.")
+    genes = [g for g in re.split(r"[,\s]+", genes_text.strip()) if g]
+    if len(genes) < 2:
+        st.error("Enter at least 2 gene symbols.")
+    elif not os.environ.get("BIOGRID_ACCESS_KEY"):
+        st.error("BIOGRID_ACCESS_KEY is not configured for this app.")
     else:
-        final_text = ""
-        with st.status(f"Validating {gene1} ↔ {gene2}...", expanded=True) as status:
+        with st.spinner(f"Querying StringDB + BioGRID for {len(genes)} genes..."):
             try:
-                for event in validate_gene_pair_stream(
-                    gene1, gene2, int(species_tax_id), tissue or None
-                ):
-                    if event["type"] == "tool_call":
-                        label = TOOL_LABELS.get(event["name"], f"🔧 Calling {event['name']}")
-                        args = ", ".join(f"{k}={v!r}" for k, v in event["input"].items())
-                        st.write(f"{label} — `{args}`")
-                    elif event["type"] == "tool_result":
-                        with st.expander(f"Raw result from `{event['name']}`"):
-                            st.code(event["output"], language="json")
-                    elif event["type"] == "text":
-                        final_text += event["text"]
-                        st.write(event["text"])
-            except Exception as exc:  # surface API/network errors in the UI, not a stack trace
-                status.update(label="Failed", state="error")
-                st.error(f"Validation failed: {exc}")
-                final_text = ""
-            else:
-                status.update(label="Done", state="complete")
+                results, invalid_genes = validate_gene_network(
+                    genes, int(species_tax_id), tissue or None
+                )
+            except Exception as exc:
+                st.error(f"Lookup failed: {exc}")
+                results, invalid_genes = [], []
 
-        if final_text:
-            st.divider()
-            st.markdown("## Verdict")
-            st.markdown(final_text)
+        if invalid_genes:
+            st.warning(f"Could not resolve {len(invalid_genes)} gene(s): {', '.join(invalid_genes)}")
+
+        if not results:
+            st.info("No interactions found among the resolved genes.")
+        else:
+            df = pd.DataFrame([asdict(r) for r in results])
+            df = df.sort_values("string_combined_score", ascending=False, na_position="last")
+
+            display_df = df[
+                [
+                    "gene1",
+                    "gene2",
+                    "verdict",
+                    "string_combined_score",
+                    "string_curated_overlap_risk",
+                    "biogrid_evidence_count",
+                    "string_source_url",
+                    "biogrid_source_url",
+                ]
+            ].rename(
+                columns={
+                    "gene1": "Gene 1",
+                    "gene2": "Gene 2",
+                    "verdict": "Verdict",
+                    "string_combined_score": "StringDB Score",
+                    "string_curated_overlap_risk": "Curated-Overlap Risk",
+                    "biogrid_evidence_count": "BioGRID Evidence #",
+                    "string_source_url": "StringDB Link",
+                    "biogrid_source_url": "BioGRID Link",
+                }
+            )
+
+            st.success(f"Found {len(results)} interacting pairs among {len(genes) - len(invalid_genes)} genes.")
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "StringDB Link": st.column_config.LinkColumn("StringDB", display_text="View ↗"),
+                    "BioGRID Link": st.column_config.LinkColumn("BioGRID", display_text="View ↗"),
+                },
+            )
+
+            if tissue:
+                caveat_rows = df[df["notes"].str.contains("CAVEAT", na=False)]
+                if not caveat_rows.empty:
+                    with st.expander(f"⚠️ {len(caveat_rows)} pair(s) flagged with a tissue/independence caveat"):
+                        for _, row in caveat_rows.iterrows():
+                            st.write(f"**{row['gene1']} ↔ {row['gene2']}**: {row['notes']}")
+
+            csv_bytes = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download full results (CSV)",
+                data=csv_bytes,
+                file_name="gene_interaction_network.csv",
+                mime="text/csv",
+            )
