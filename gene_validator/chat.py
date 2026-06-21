@@ -48,13 +48,33 @@ even if phrased casually ("do BRCA1, BRCA2 and TP53 interact in liver?").
 If the user names fewer than 2 genes, or hasn't named any genes yet, ask a \
 short clarifying question instead of calling the tool.
 
+Follow-up requests (e.g. "now check those in liver", "just the StringDB-only \
+ones", "what about EGFR too") refer back to the genes from the conversation \
+so far. If you can identify the exact gene list from earlier in this \
+conversation, call the tool again with that list (plus whatever changed -- \
+new tissue, added gene, etc.) rather than answering from memory of the \
+earlier summary, since that summary may not have included every gene or \
+pair. If you cannot identify the exact gene list (e.g. it was never fully \
+stated, or this is a fresh conversation with no prior gene-list turn), ask \
+the user to restate it -- do not guess and do not say you'll do something \
+without doing it.
+
+CRITICAL: never produce a reply like "let me check that" or "I'll run the \
+full panel" as your final answer. Either call the tool in this same turn, \
+or ask a clarifying question. A reply that promises an action but takes \
+none leaves the user with nothing -- that is worse than asking a question.
+
 After the tool returns, write a brief, conversational summary (a few \
 sentences, not a report) -- mention the most notable pairs, whether sources \
 agree, and any caveats (genes that didn't resolve, tissue-expression flags, \
 or curated-database overlap risk) only if they're notable. The full results \
 table is shown separately in the UI, so don't try to enumerate every pair \
 in your reply -- highlight what's interesting and let the table carry the \
-detail.
+detail. If the user asked for a specific subset (e.g. "StringDB-only \
+pairs" -- meaning string_interaction_found is true and \
+biogrid_interaction_found is false), filter to exactly that subset in your \
+summary; don't substitute a different ranking (like "sorted by score") for \
+what was actually asked.
 """
 
 FIND_INTERACTIONS_TOOL = {
@@ -123,14 +143,25 @@ def _summarize_for_model(results: list, invalid_genes: list) -> str:
 
 def chat_turn(
     message: str, history: Iterable[Dict[str, str]]
-) -> Tuple[str, Optional[Dict[str, Any]]]:
+) -> Tuple[str, Optional[Dict[str, Any]], str]:
     """Run one chat turn.
 
     `history` is the prior turns as plain {"role": "user"|"assistant",
-    "content": str} dicts (display text only).
+    "content": str} dicts. Each assistant entry should be the *history_content*
+    returned by a previous call (not necessarily the same as what was shown
+    to the user) -- see the third return value below.
 
-    Returns (reply_text, results_payload). results_payload is None if no
-    tool call happened this turn, else {"results": [...], "invalid_genes": [...]}.
+    Returns (reply_text, results_payload, history_content).
+      - reply_text: what to show the user in the chat UI.
+      - results_payload: None if no tool call happened this turn, else
+        {"results": [...], "invalid_genes": [...]}.
+      - history_content: what the caller should store as this turn's
+        assistant content for future chat_turn() calls. When a tool was
+        called, this is reply_text plus a hidden note recording the exact
+        genes/tissue/species used, so follow-ups ("just the StringDB-only
+        ones") can be answered by re-querying the same gene set instead of
+        the model trying to recall it from its own prior summary (which may
+        not have enumerated every gene, especially for large panels).
     """
     client = anthropic.Anthropic()
     messages: List[Dict[str, Any]] = [
@@ -139,6 +170,7 @@ def chat_turn(
     messages.append({"role": "user", "content": message})
 
     results_payload: Optional[Dict[str, Any]] = None
+    last_query: Optional[Dict[str, Any]] = None
 
     for _ in range(MAX_AGENT_ITERATIONS):
         response = client.messages.create(
@@ -151,7 +183,15 @@ def chat_turn(
 
         if response.stop_reason != "tool_use":
             text = "".join(b.text for b in response.content if b.type == "text")
-            return text, results_payload
+            history_content = text
+            if last_query is not None:
+                history_content += (
+                    f"\n\n[context (not shown to user): last queried genes = "
+                    f"{', '.join(last_query['genes'])}; tissue="
+                    f"{last_query.get('tissue') or 'none'}; species="
+                    f"{last_query.get('species') or 'human'}]"
+                )
+            return text, results_payload, history_content
 
         messages.append({"role": "assistant", "content": response.content})
 
@@ -159,21 +199,35 @@ def chat_turn(
         for block in response.content:
             if block.type != "tool_use":
                 continue
+            is_error = False
             if block.name == "find_gene_interactions":
-                results, invalid_genes = _run_find_interactions(**block.input)
-                results_payload = {
-                    "results": [asdict(r) for r in results],
-                    "invalid_genes": invalid_genes,
-                }
-                tool_result_str = _summarize_for_model(results, invalid_genes)
+                try:
+                    results, invalid_genes = _run_find_interactions(**block.input)
+                except Exception as exc:  # upstream API hiccup -- let the model recover, don't crash the turn
+                    is_error = True
+                    tool_result_str = (
+                        f"Lookup failed due to an upstream error: {exc}. "
+                        "Tell the user briefly and suggest trying again."
+                    )
+                else:
+                    results_payload = {
+                        "results": [asdict(r) for r in results],
+                        "invalid_genes": invalid_genes,
+                    }
+                    last_query = dict(block.input)
+                    tool_result_str = _summarize_for_model(results, invalid_genes)
             else:
+                is_error = True
                 tool_result_str = json.dumps({"error": f"unknown tool {block.name}"})
             tool_results.append(
-                {"type": "tool_result", "tool_use_id": block.id, "content": tool_result_str}
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": tool_result_str,
+                    "is_error": is_error,
+                }
             )
         messages.append({"role": "user", "content": tool_results})
 
-    return (
-        "I'm having trouble completing that request -- try rephrasing or narrowing the gene list.",
-        results_payload,
-    )
+    fallback = "I'm having trouble completing that request -- try rephrasing or narrowing the gene list."
+    return fallback, results_payload, fallback

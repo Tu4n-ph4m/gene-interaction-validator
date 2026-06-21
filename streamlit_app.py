@@ -106,19 +106,27 @@ def run_turn(message: str) -> None:
         )
         return
 
+    # Use history_content (carries a hidden note of the exact genes/tissue/
+    # species last queried) for the API, not the display-only content.
     text_history = [
-        {"role": m["role"], "content": m["content"]} for m in st.session_state.messages
+        {"role": m["role"], "content": m.get("history_content", m["content"])}
+        for m in st.session_state.messages
     ]
     st.session_state.messages.append({"role": "user", "content": message})
 
     with st.spinner("Thinking..."):
         try:
-            reply, results_payload = chat_turn(message, text_history)
+            reply, results_payload, history_content = chat_turn(message, text_history)
         except Exception as exc:
-            reply, results_payload = f"Something went wrong: {exc}", None
+            reply, results_payload, history_content = f"Something went wrong: {exc}", None, None
 
     st.session_state.messages.append(
-        {"role": "assistant", "content": reply, "results": results_payload}
+        {
+            "role": "assistant",
+            "content": reply,
+            "history_content": history_content,
+            "results": results_payload,
+        }
     )
 
 

@@ -94,7 +94,7 @@ def chat(req: ChatRequest) -> dict:
         )
 
     try:
-        reply, results_payload = chat_turn(
+        reply, results_payload, history_content = chat_turn(
             req.message, [turn.model_dump() for turn in req.history]
         )
     except ValueError as exc:  # e.g. an unresolvable species name extracted from chat
@@ -102,7 +102,7 @@ def chat(req: ChatRequest) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Chat turn failed: {exc}") from exc
 
-    return {"reply": reply, "results": results_payload}
+    return {"reply": reply, "results": results_payload, "history_content": history_content}
 
 
 if __name__ == "__main__":

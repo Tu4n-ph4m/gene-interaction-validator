@@ -198,7 +198,7 @@ chatForm.addEventListener("submit", async (e) => {
     }
 
     history.push({ role: "user", content: message });
-    history.push({ role: "assistant", content: data.reply });
+    history.push({ role: "assistant", content: data.history_content ?? data.reply });
   } catch (err) {
     thinkingMsg.remove();
     appendMessage("assistant error", `⚠️ ${escapeHtml(err.message)}`);
