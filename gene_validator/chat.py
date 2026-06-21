@@ -175,11 +175,26 @@ def chat_turn(
     for _ in range(MAX_AGENT_ITERATIONS):
         response = client.messages.create(
             model=MODEL,
-            max_tokens=1024,
+            # Generous budget: a tool_use call for a large gene list (e.g.
+            # 1000 genes) needs several thousand output tokens just to write
+            # out the JSON array argument. Too low a limit here truncates
+            # the tool call mid-argument (stop_reason="max_tokens"), which
+            # silently produces an empty/partial "genes" list instead of an
+            # error -- this previously caused the agent to "narrate" an
+            # action it never actually took.
+            max_tokens=8192,
             system=SYSTEM_PROMPT,
             tools=[FIND_INTERACTIONS_TOOL],
             messages=messages,
         )
+
+        if response.stop_reason == "max_tokens":
+            return (
+                "That gene list is too large for me to process in one request -- "
+                "try splitting it into smaller batches.",
+                results_payload,
+                "(a request was truncated for being too large; ask the user to split the gene list)",
+            )
 
         if response.stop_reason != "tool_use":
             text = "".join(b.text for b in response.content if b.type == "text")
