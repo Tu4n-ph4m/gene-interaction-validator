@@ -41,6 +41,10 @@ with st.form("network_form"):
         placeholder="BRCA1, BRCA2, TP53, EGFR, MYC, PTEN",
         height=140,
     )
+    gene_file = st.file_uploader(
+        "Or upload a file (.txt or .csv, one gene per line or comma-separated)",
+        type=["txt", "csv"],
+    )
     col1, col2 = st.columns(2)
     tissue = col1.text_input(
         "Tissue / cell type (optional)", placeholder="liver, prostate, bone marrow, ..."
@@ -49,7 +53,10 @@ with st.form("network_form"):
     submitted = st.form_submit_button("Find interactions", use_container_width=True)
 
 if submitted:
-    genes = [g for g in re.split(r"[,\s]+", genes_text.strip()) if g]
+    source_text = gene_file.read().decode("utf-8") if gene_file else genes_text
+    genes = [g for g in re.split(r"[,\s]+", source_text.strip()) if g]
+    if gene_file:
+        st.caption(f"Loaded {len(genes)} gene(s) from {gene_file.name}.")
     if len(genes) < 2:
         st.error("Enter at least 2 gene symbols.")
     elif not os.environ.get("BIOGRID_ACCESS_KEY"):

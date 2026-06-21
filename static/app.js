@@ -3,8 +3,40 @@ const submitBtn = document.getElementById("submit-btn");
 const statusEl = document.getElementById("status");
 const resultsEl = document.getElementById("results");
 const speciesSelect = document.getElementById("species");
+const geneFileInput = document.getElementById("gene-file");
+const fileInfoEl = document.getElementById("file-info");
+const genesTextarea = document.getElementById("genes");
 
 let lastResults = [];
+
+const MAX_GENE_FILE_BYTES = 5 * 1024 * 1024; // 5MB is generous for a gene list
+
+geneFileInput.addEventListener("change", () => {
+  const file = geneFileInput.files[0];
+  fileInfoEl.textContent = "";
+  if (!file) return;
+
+  if (file.size > MAX_GENE_FILE_BYTES) {
+    fileInfoEl.textContent = `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB, max 5 MB).`;
+    geneFileInput.value = "";
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    const genes = splitGenes(String(reader.result));
+    if (!genes.length) {
+      fileInfoEl.textContent = "No gene symbols found in that file.";
+      return;
+    }
+    genesTextarea.value = genes.join(", ");
+    fileInfoEl.textContent = `Loaded ${genes.length} gene(s) from ${file.name}.`;
+  };
+  reader.onerror = () => {
+    fileInfoEl.textContent = `Could not read ${file.name}.`;
+  };
+  reader.readAsText(file);
+});
 
 async function loadSpeciesOptions() {
   try {

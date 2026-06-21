@@ -19,6 +19,10 @@
       <label for="genes">Genes (comma, space, or newline separated)</label>
       <textarea id="genes" rows="5" placeholder="BRCA1, BRCA2, TP53, EGFR, MYC, PTEN"></textarea>
 
+      <label for="gene-file">Or upload a file (.txt or .csv, one gene per line or comma-separated)</label>
+      <input id="gene-file" type="file" accept=".txt,.csv,text/plain,text/csv" />
+      <div id="file-info" class="file-info"></div>
+
       <div class="row">
         <div class="field">
           <label for="tissue">Tissue / cell type (optional)</label>

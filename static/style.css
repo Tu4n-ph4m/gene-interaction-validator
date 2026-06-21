@@ -64,6 +64,17 @@ input {
   margin-bottom: 1rem;
 }
 
+input[type="file"] {
+  padding: 0.5rem;
+  background: #15171f;
+}
+
+.file-info {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin: -0.5rem 0 1rem;
+}
+
 textarea:focus,
 input:focus {
   outline: none;
